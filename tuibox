@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+import requests
+import re
+import time
+import subprocess
+import sys
+import ipaddress
+from datetime import datetime
+
+# Handle Timezone Jakarta
+try:
+    from zoneinfo import ZoneInfo
+    JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
+except ImportError:
+    from datetime import timezone, timedelta
+    JAKARTA_TZ = timezone(timedelta(hours=7))
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt, IntPrompt, Confirm
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+console = Console()
+
+class TuiBoxSync:
+    def __init__(self):
+        self.router = ""
+        self.port = 22
+        self.user = ""
+        self.password = ""
+        self.nb_url = ""
+        self.nb_token = ""
+        self.prefixes_input = []
+        self.headers = {}
+        self.ping_sweep = False
+        self.auto_sync = False
+        self.interval = 10
+
+    def get_now(self):
+        return datetime.now(JAKARTA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+    def get_short_time(self):
+        # Format waktu pendek untuk deskripsi NetBox (Tgl/Bln Jam:Menit)
+        return datetime.now(JAKARTA_TZ).strftime('%d/%m %H:%M')
+
+    def extract_value(self, key, text):
+        match = re.search(rf'{key}=(?:"([^"]+)"|(\S+))', text, re.IGNORECASE)
+        if match: return match.group(1) if match.group(1) else match.group(2)
+        return None
+
+    def setup(self):
+        console.print(Panel("[bold green]TUIBOX: NetBox IPAM & MikroTik Sync (V5 - TIMESTAMPS)[/bold green]", expand=False))
+
+        self.router = Prompt.ask("Masukkan IP Router MikroTik", default="10.0.2.110")
+        self.port = IntPrompt.ask("Masukkan Port SSH Router", default=21112)
+        self.user = Prompt.ask("Masukkan Username Router", default="test-speed")
+        self.password = Prompt.ask("Masukkan Password Router", default="speed-test", password=True)
+
+        default_nb = f"http://10.28.1.100:8001/api"
+        self.nb_url = Prompt.ask("Masukkan URL API NetBox", default=default_nb).rstrip('/')
+        self.nb_token = Prompt.ask("Masukkan API Token NetBox", default="6a51599f642c2a3baadf8c62f8aa1e8c3fead6b1")
+
+        prefix_raw = Prompt.ask("Masukkan Prefix/Segment (pisahkan koma)", default="10.28.0.0/16, 192.168.30.0/24, 192.168.80.0/24")
+        self.prefixes_input = [p.strip() for p in prefix_raw.split(',')]
+
+        self.ping_sweep = Confirm.ask("Jalankan Ping Sweep?", default=False)
+        self.auto_sync = Confirm.ask("Aktifkan Mode Auto-Sync?", default=True)
+        if self.auto_sync:
+            self.interval = IntPrompt.ask("Masukkan Interval Sinkronisasi (Menit)", default=10)
+
+        self.headers = {"Authorization": f"Token {self.nb_token}", "Content-Type": "application/json", "Accept": "application/json"}
+
+    def run_ssh(self, command):
+        cmd_str = f'sshpass -p "{self.password}" ssh -p {self.port} -o StrictHostKeyChecking=no -o ConnectTimeout=15 {self.user}@{self.router} "{command}"'
+        try:
+            result = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, timeout=600)
+            return result.stdout if result.returncode == 0 else ""
+        except: return ""
+
+    def validate_connection(self):
+        with console.status("[bold yellow]Memvalidasi koneksi...[/bold yellow]"):
+            try:
+                res = requests.get(f"{self.nb_url}/status/", headers=self.headers, timeout=5)
+                if res.status_code != 200:
+                    console.print(f"[bold red]Gagal terhubung ke NetBox API (Status: {res.status_code})[/bold red]")
+                    return False
+            except Exception as e:
+                console.print(f"[bold red]Gagal terhubung ke NetBox URL: {str(e)}[/bold red]")
+                return False
+
+            identity = self.run_ssh("/system identity print")
+            if not identity:
+                console.print("[bold red]Gagal terhubung ke MikroTik via SSH.[/bold red]")
+                return False
+            console.print(f"[bold green]Koneksi Berhasil![/bold green] Router: {identity.strip()}")
+            return True
+
+    def sync_vlans_to_netbox(self):
+        vlan_data = {}
+        with console.status("[bold yellow]Sinkronisasi VLAN ke NetBox...[/bold yellow]"):
+            vlan_raw = self.run_ssh("/interface vlan print terse without-paging")
+            for line in vlan_raw.splitlines():
+                name = self.extract_value("name", line)
+                vid = self.extract_value("vlan-id", line)
+                if name and vid:
+                    vid = int(vid)
+                    vlan_data[name] = vid
+                    try:
+                        res = requests.get(f"{self.nb_url}/ipam/vlans/?vid={vid}&name={name}", headers=self.headers).json()
+                        if res.get('count', 0) == 0:
+                            payload = {"name": name, "vid": vid, "status": "active", "description": "Auto-created by TUIBOX"}
+                            requests.post(f"{self.nb_url}/ipam/vlans/", headers=self.headers, json=payload)
+                    except: pass
+        return vlan_data
+
+    def sync_prefixes_to_netbox(self):
+        with console.status("[bold yellow]Menyelaraskan Prefix ke NetBox...[/bold yellow]"):
+            for p in self.prefixes_input:
+                try:
+                    cidr = str(ipaddress.ip_network(p, strict=False))
+                    res = requests.get(f"{self.nb_url}/ipam/prefixes/?prefix={cidr}", headers=self.headers).json()
+                    if res['count'] == 0:
+                        payload = {"prefix": cidr, "status": "active", "description": "Auto-created by TUIBOX"}
+                        requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json=payload)
+                except: pass
+
+    def ip_in_prefixes(self, ip_str):
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            for p in self.prefixes_input:
+                if ip_obj in ipaddress.ip_network(p, strict=False): return True
+        except: pass
+        return False
+
+    def scan_and_sync(self):
+        waktu_skrg = self.get_now()
+        w_pendek = self.get_short_time() # Ambil format pendek (contoh: 13/03 10:45)
+        
+        vlan_map = self.sync_vlans_to_netbox()
+        self.sync_prefixes_to_netbox()
+
+        console.print(Panel(f"[bold cyan]Memulai Sinkronisasi IPAM[/bold cyan]\nWaktu: {waktu_skrg}", expand=False))
+
+        ip_to_if = {}
+        addr_raw = self.run_ssh("/ip address print terse without-paging")
+        for line in addr_raw.splitlines():
+            ip, iface = self.extract_value("address", line), self.extract_value("interface", line)
+            if ip and iface: ip_to_if[ip.split('/')[0]] = iface
+
+        if self.ping_sweep:
+            with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+                for p in self.prefixes_input:
+                    try:
+                        net = ipaddress.ip_network(p, strict=False)
+                        subnets = [net] if net.prefixlen >= 24 else list(net.subnets(new_prefix=24))
+                        for i in range(0, len(subnets), 5):
+                            batch = subnets[i:i+5]
+                            cmds = [f":for i from=1 to=254 do={{ /tool ping {str(sub.network_address).rsplit('.', 1)[0]}.$i count=1 timeout=5ms }}" for sub in batch]
+                            progress.add_task(description=f"Probing {len(batch)} Subnets...", total=None)
+                            self.run_ssh(" ; ".join(cmds))
+                    except: continue
+
+        live_devices = {}
+        with console.status("[bold yellow]Membedah data ARP, DHCP, Neighbor...[/bold yellow]"):
+            arp_raw = self.run_ssh("/ip arp print terse without-paging")
+            for line in arp_raw.splitlines():
+                ip, mac = self.extract_value("address", line), self.extract_value("mac-address", line)
+                if ip and mac:
+                    mac, if_name = mac.upper(), self.extract_value("interface", line) or "N/A"
+                    if self.ip_in_prefixes(ip): live_devices[ip] = {"mac": mac, "src": f"ARP ({if_name})", "if": if_name}
+
+            dhcp_raw = self.run_ssh("/ip dhcp-server lease print terse without-paging")
+            for line in dhcp_raw.splitlines():
+                ip, mac = self.extract_value("address", line), self.extract_value("mac-address", line)
+                if ip and mac:
+                    mac, host = mac.upper(), self.extract_value("host-name", line) or "Unknown"
+                    if self.ip_in_prefixes(ip):
+                        if ip not in live_devices: live_devices[ip] = {"mac": mac, "src": f"DHCP ({host})", "if": ip_to_if.get(ip, "N/A")}
+                        else:
+                            if "ARP" in live_devices[ip]["src"]: live_devices[ip]["src"] = f"ARP+DHCP ({host})"
+
+            nb_raw = self.run_ssh("/ip neighbor print terse without-paging")
+            for line in nb_raw.splitlines():
+                ip, mac = self.extract_value("address", line), self.extract_value("mac-address", line)
+                if ip and mac:
+                    mac, if_name = mac.upper(), self.extract_value("interface", line) or "N/A"
+                    if self.ip_in_prefixes(ip) and ip not in live_devices: live_devices[ip] = {"mac": mac, "src": f"Neighbor ({if_name})", "if": if_name}
+
+        added, updated, inactive, errors = 0, 0, 0, 0
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console) as progress:
+            nb_ips = {}
+            try:
+                url = f"{self.nb_url}/ipam/ip-addresses/?limit=1000"
+                while url:
+                    res_json = requests.get(url, headers=self.headers).json()
+                    for item in res_json.get('results', []):
+                        ip_only = item['address'].split('/')[0]
+                        if self.ip_in_prefixes(ip_only):
+                            nb_ips[ip_only] = {"id": item['id'], "desc": item.get('description', '') or '', "status": item['status']['value']}
+                    url = res_json.get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal mengambil data dari NetBox: {e}[/bold red]")
+
+            task = progress.add_task("[green]Updating NetBox...", total=len(live_devices) + len(nb_ips))
+            seen_in_scan = set()
+
+            for ip, data in live_devices.items():
+                seen_in_scan.add(ip)
+                if_name = data.get('if', 'N/A')
+                vlan_info = f"VLAN: {vlan_map.get(if_name, 'None')}"
+                
+                # Base Info tanpa timestamp
+                base_info = f"MAC: {data['mac']} | {vlan_info} | IF: {if_name} | Src: {data['src']}"
+
+                if ip in nb_ips:
+                    # Update jika IP berubah status dari mati ke hidup, atau ganti MAC/Interface
+                    if nb_ips[ip]['status'] != 'active' or data['mac'] not in nb_ips[ip]['desc'] or if_name not in nb_ips[ip]['desc']:
+                        # Bersihkan tag lama, tambahkan tag [UP] dengan waktu sekarang
+                        final_desc = f"[UP: {w_pendek}] {base_info}"[:200]
+                        res = requests.patch(f"{self.nb_url}/ipam/ip-addresses/{nb_ips[ip]['id']}/", headers=self.headers, json={"status": "active", "description": final_desc})
+                        if res.status_code in [200, 201]:
+                            updated += 1
+                            console.print(f"[yellow][UPDATE][/yellow] IP {ip} is now UP (MAC: {data['mac']})")
+                        else:
+                            errors += 1
+                    # Jika tidak ada perubahan, tidak usah dipatch agar changelog NetBox tetap bersih
+                else:
+                    matched_prefix = "24"
+                    for p in self.prefixes_input:
+                        if ipaddress.ip_address(ip) in ipaddress.ip_network(p, strict=False): matched_prefix = p.split('/')[1]; break
+                    
+                    final_desc = f"[NEW: {w_pendek}] {base_info}"[:200]
+                    res = requests.post(f"{self.nb_url}/ipam/ip-addresses/", headers=self.headers, json={"address": f"{ip}/{matched_prefix}", "status": "active", "description": final_desc})
+                    if res.status_code == 201:
+                        added += 1
+                        console.print(f"[green][NEW IP][/green] Found {ip} ({data['mac']})")
+                    else:
+                        errors += 1
+                progress.advance(task)
+
+            for ip, data in nb_ips.items():
+                if ip not in seen_in_scan and data['status'] == 'active':
+                    # Bersihkan tag waktu lama (NEW/UP), ganti dengan tag OFF
+                    clean_desc = re.sub(r'^\[.*?\]\s*', '', data['desc'])
+                    final_desc = f"[OFF: {w_pendek}] {clean_desc}"[:200]
+                    
+                    res = requests.patch(f"{self.nb_url}/ipam/ip-addresses/{data['id']}/", headers=self.headers, json={"status": "deprecated", "description": final_desc})
+                    if res.status_code in [200, 201]:
+                        inactive += 1
+                        console.print(f"[red][OFFLINE][/red] IP {ip} is no longer detected")
+                progress.advance(task)
+
+        console.print(f"\n[bold green]✔ Sinkronisasi Selesai![/bold green]")
+        console.print(f"Total IP Live di Router: [bold cyan]{len(live_devices)}[/bold cyan]")
+        console.print(f"IP Baru: [bold green]{added}[/bold green] | IP Update: [bold yellow]{updated}[/bold yellow] | IP Offline: [bold red]{inactive}[/bold red] | Gagal API: [bold red]{errors}[/bold red]")
+
+if __name__ == "__main__":
+    sync = TuiBoxSync()
+    try:
+        sync.setup()
+        if sync.validate_connection():
+            while True:
+                sync.scan_and_sync()
+                if not sync.auto_sync: break
+                interval_sec = sync.interval * 60
+                console.print(f"\n[bold yellow]Menunggu {sync.interval} menit untuk sinkronisasi berikutnya...[/bold yellow]")
+                for i in range(interval_sec, 0, -1):
+                    if i % 60 == 0 or i <= 5:
+                        sys.stdout.write(f"\rSelanjutnya dalam: {i//60}m {i%60}s  ")
+                        sys.stdout.flush()
+                    time.sleep(1)
+                console.print("\n[bold green]Memulai Sinkronisasi Berkala...[/bold green]")
+    except KeyboardInterrupt: console.print("\n[bold red]Dibatalkan oleh User.[/bold red]")
+    except Exception as e: console.print(f"\n[bold red]Error Fatal:[/bold red] {e}")
