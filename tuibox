@@ -5,6 +5,8 @@ import time
 import subprocess
 import sys
 import ipaddress
+import configparser
+import os
 from datetime import datetime
 
 # Handle Timezone Jakarta
@@ -23,13 +25,17 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 console = Console()
 
 class TuiBoxSync:
-    def __init__(self):
+    def __init__(self, config_file="config.ini"):
+        self.config_file = config_file
+        self.config = configparser.ConfigParser()
         self.router = ""
         self.port = 22
         self.user = ""
         self.password = ""
         self.nb_url = ""
         self.nb_token = ""
+        self.site = ""
+        self.device_role = "" # New: Default device role for NetBox
         self.prefixes_input = []
         self.headers = {}
         self.ping_sweep = False
@@ -44,29 +50,58 @@ class TuiBoxSync:
         return datetime.now(JAKARTA_TZ).strftime('%d/%m %H:%M')
 
     def extract_value(self, key, text):
-        match = re.search(rf'{key}=(?:"([^"]+)"|(\S+))', text, re.IGNORECASE)
+        match = re.search(rf'{key}[=:]\s*(?:"([^"]+)"|(\S+))', text, re.IGNORECASE)
         if match: return match.group(1) if match.group(1) else match.group(2)
         return None
 
     def setup(self):
-        console.print(Panel("[bold green]TUIBOX: NetBox IPAM & MikroTik Sync (V5 - TIMESTAMPS)[/bold green]", expand=False))
+        console.print(Panel("[bold green]TUIBOX: NetBox IPAM & MikroTik Sync (V7 - DCIM Sync)[/bold green]", expand=False))
+        
+        # Read config file if it exists
+        if os.path.exists(self.config_file):
+            console.print(f"[yellow]Membaca konfigurasi dari '{self.config_file}'...[/yellow]")
+            self.config.read(self.config_file)
+        else:
+            console.print(f"[yellow]File '{self.config_file}' tidak ditemukan, masuk ke mode interaktif.[/yellow]")
 
-        self.router = Prompt.ask("Masukkan IP Router MikroTik", default="10.0.2.110")
-        self.port = IntPrompt.ask("Masukkan Port SSH Router", default=21112)
-        self.user = Prompt.ask("Masukkan Username Router", default="test-speed")
-        self.password = Prompt.ask("Masukkan Password Router", default="speed-test", password=True)
+        # Helper to get config value or prompt user
+        def get_config_or_prompt(section, key, prompt_text, default=None, is_password=False, is_int=False, is_bool=False):
+            if self.config.has_option(section, key):
+                if is_bool:
+                    return self.config.getboolean(section, key)
+                elif is_int:
+                    return self.config.getint(section, key)
+                return self.config.get(section, key)
+            
+            # Fallback to interactive prompt
+            if is_bool:
+                return Confirm.ask(prompt_text, default=default)
+            if is_int:
+                return IntPrompt.ask(prompt_text, default=default)
+            return Prompt.ask(prompt_text, default=str(default) if default is not None else "", password=is_password)
 
-        default_nb = f"http://10.28.1.100:8001/api"
-        self.nb_url = Prompt.ask("Masukkan URL API NetBox", default=default_nb).rstrip('/')
-        self.nb_token = Prompt.ask("Masukkan API Token NetBox", default="6a51599f642c2a3baadf8c62f8aa1e8c3fead6b1")
+        # MikroTik Settings
+        self.router = get_config_or_prompt('mikrotik', 'router', "Masukkan IP Router MikroTik", default="10.0.2.110")
+        self.port = get_config_or_prompt('mikrotik', 'port', "Masukkan Port SSH Router", default=21112, is_int=True)
+        self.user = get_config_or_prompt('mikrotik', 'user', "Masukkan Username Router", default="test-speed")
+        self.password = get_config_or_prompt('mikrotik', 'password', "Masukkan Password Router", default="speed-test", is_password=True)
 
-        prefix_raw = Prompt.ask("Masukkan Prefix/Segment (pisahkan koma)", default="10.28.0.0/16, 192.168.30.0/24, 192.168.80.0/24")
+        # NetBox Settings
+        default_nb = "http://10.28.1.100:8001/api"
+        self.nb_url = get_config_or_prompt('netbox', 'url', "Masukkan URL API NetBox", default=default_nb).rstrip('/')
+        self.nb_token = get_config_or_prompt('netbox', 'token', "Masukkan API Token NetBox", default="6a51599f642c2a3baadf8c62f8aa1e8c3fead6b1", is_password=True)
+        self.site = get_config_or_prompt('netbox', 'site', "Masukkan Nama Site di NetBox", default="DefaultSite")
+        self.device_role = get_config_or_prompt('netbox', 'device_role', "Masukkan Peran Perangkat di NetBox (contoh: Router)", default="Router")
+
+        # Sync Settings
+        default_prefixes = "10.28.0.0/16, 192.168.30.0/24, 192.168.80.0/24"
+        prefix_raw = get_config_or_prompt('sync', 'prefixes', "Masukkan Prefix/Segment (pisahkan koma)", default=default_prefixes)
         self.prefixes_input = [p.strip() for p in prefix_raw.split(',')]
-
-        self.ping_sweep = Confirm.ask("Jalankan Ping Sweep?", default=False)
-        self.auto_sync = Confirm.ask("Aktifkan Mode Auto-Sync?", default=True)
+        
+        self.ping_sweep = get_config_or_prompt('sync', 'ping_sweep', "Jalankan Ping Sweep?", default=False, is_bool=True)
+        self.auto_sync = get_config_or_prompt('sync', 'auto_sync', "Aktifkan Mode Auto-Sync?", default=True, is_bool=True)
         if self.auto_sync:
-            self.interval = IntPrompt.ask("Masukkan Interval Sinkronisasi (Menit)", default=10)
+            self.interval = get_config_or_prompt('sync', 'interval_minutes', "Masukkan Interval Sinkronisasi (Menit)", default=10, is_int=True)
 
         self.headers = {"Authorization": f"Token {self.nb_token}", "Content-Type": "application/json", "Accept": "application/json"}
 
@@ -95,34 +130,276 @@ class TuiBoxSync:
             console.print(f"[bold green]Koneksi Berhasil![/bold green] Router: {identity.strip()}")
             return True
 
+    def get_or_create(self, endpoint, params, create_payload):
+        """Helper to get an object's ID or create it if it doesn't exist."""
+        try:
+            url = f"{self.nb_url}{endpoint}"
+            res = requests.get(url, headers=self.headers, params=params)
+            res.raise_for_status()
+            data = res.json()
+
+            if data['count'] > 0:
+                return data['results'][0]['id']
+            else:
+                console.print(f"Membuat entri baru di {endpoint} dengan payload: {create_payload.get('name', create_payload.get('model', ''))}")
+                res_create = requests.post(url, headers=self.headers, json=create_payload)
+                res_create.raise_for_status()
+                return res_create.json()['id']
+        except requests.exceptions.RequestException as e:
+            console.print(f"[bold red]API Error on {endpoint}: {e}[/bold red]")
+            if 'res_create' in locals() and hasattr(res_create, 'text'):
+                 console.print(f"[bold red]Payload failed: {create_payload} | Response: {res_create.text}[/bold red]")
+            return None
+
+    def sync_device_to_netbox(self):
+        with console.status("[bold yellow]Sinkronisasi Perangkat (Router) ke NetBox...[/bold yellow]"):
+            # 1. Get Router Info
+            identity_raw = self.run_ssh("/system identity print")
+            hostname = self.extract_value("name", identity_raw)
+            if not hostname:
+                console.print("[bold red]Gagal mendapatkan hostname router. Membatalkan sinkronisasi perangkat.[/bold red]")
+                return None
+
+            routerboard_raw = self.run_ssh("/system routerboard print")
+            serial_number = self.extract_value("serial-number", routerboard_raw)
+            model = self.extract_value("model", routerboard_raw)
+            if not serial_number or not model:
+                console.print("[bold red]Gagal mendapatkan serial-number atau model. Membatalkan sinkronisasi perangkat.[/bold red]")
+                return None
+
+            # 2. Ensure Dependencies Exist in NetBox
+            manufacturer_id = self.get_or_create(
+                endpoint='/dcim/manufacturers/',
+                params={'name': 'MikroTik'},
+                create_payload={'name': 'MikroTik', 'slug': 'mikrotik'}
+            )
+            if not manufacturer_id: return None
+
+            slug = re.sub(r'[^a-z0-9-]+', '', self.site.lower().replace('_', '-'))
+            site_id = self.get_or_create(
+                endpoint='/dcim/sites/',
+                params={'name': self.site},
+                create_payload={'name': self.site, 'slug': slug}
+            )
+            if not site_id: return None
+
+            device_type_id = self.get_or_create(
+                endpoint='/dcim/device-types/',
+                params={'model': model},
+                create_payload={'model': model, 'slug': re.sub(r'[^a-z0-9-]+', '', model.lower()), 'manufacturer': manufacturer_id}
+            )
+            if not device_type_id: return None
+
+            device_role_id = self.get_or_create(
+                endpoint='/dcim/device-roles/',
+                params={'name': self.device_role},
+                create_payload={'name': self.device_role, 'slug': re.sub(r'[^a-z0-9-]+', '', self.device_role.lower())}
+            )
+            if not device_role_id: return None
+
+            # 3. Get or Create Device
+            device_id = self.get_or_create(
+                endpoint='/dcim/devices/',
+                params={'serial': serial_number},
+                create_payload={
+                    'name': hostname,
+                    'device_type': device_type_id,
+                    'role': device_role_id,
+                    'site': site_id,
+                    'serial': serial_number,
+                    'status': 'active'
+                }
+            )
+            
+            if device_id:
+                console.print(f"Perangkat '{hostname}' (ID: {device_id}) berhasil disinkronkan ke NetBox.")
+            
+            return device_id
+
+    def sync_interfaces_to_netbox(self, device_id):
+        with console.status("[bold yellow]Sinkronisasi Interface ke NetBox...[/bold yellow]"):
+            # 1. Get existing interfaces from NetBox for this device
+            nb_interfaces = {}
+            try:
+                url = f"{self.nb_url}/dcim/interfaces/?device_id={device_id}&limit=1000"
+                while url:
+                    res = requests.get(url, headers=self.headers)
+                    res.raise_for_status()
+                    for iface in res.json().get('results', []):
+                        nb_interfaces[iface['name']] = {
+                            'id': iface['id'],
+                            'mac_address': iface.get('mac_address', '').upper() if iface.get('mac_address') else None
+                        }
+                    url = res.json().get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal mengambil data interface dari NetBox: {e}[/bold red]")
+                return {}
+
+            # 2. Get interfaces from router
+            router_interfaces_raw = self.run_ssh("/interface print detail without-paging")
+            
+            interfaces_to_create = []
+            interfaces_to_update = []
+
+            # Mapping from MikroTik types to NetBox types
+            type_map = {
+                'ether': '1000base-t', 'sfp-sfpplus': '10gbase-x-sfpp',
+                'vlan': 'virtual', 'bridge': 'bridge', 'loopback': 'virtual',
+                'bond': 'lag', 'wg': 'virtual', 'eoip': 'virtual'
+            }
+
+            for line in router_interfaces_raw.splitlines():
+                if " name=" not in line: continue # Skip irrelevant lines
+                
+                name = self.extract_value("name", line)
+                iface_type = self.extract_value("type", line)
+                mac = self.extract_value("mac-address", line)
+                mac = mac.upper() if mac else None
+
+                if not name: continue
+
+                nb_type = type_map.get(iface_type, 'other')
+                
+                if name not in nb_interfaces:
+                    interfaces_to_create.append({
+                        'device': device_id,
+                        'name': name,
+                        'type': nb_type,
+                        'mac_address': mac
+                    })
+                else: # Interface exists, check for MAC update
+                    if mac and nb_interfaces[name]['mac_address'] != mac:
+                        interfaces_to_update.append({
+                            'id': nb_interfaces[name]['id'],
+                            'mac_address': mac
+                        })
+
+            # 3. Bulk create and update
+            if interfaces_to_create:
+                console.print(f"Menciptakan {len(interfaces_to_create)} interface baru...")
+                try:
+                    res = requests.post(f"{self.nb_url}/dcim/interfaces/", headers=self.headers, json=interfaces_to_create)
+                    if res.status_code != 201:
+                        console.print(f"[bold red]Gagal bulk create interface: {res.status_code} {res.text}[/bold red]")
+                except Exception as e:
+                    console.print(f"[bold red]Error bulk create interface: {e}[/bold red]")
+
+            if interfaces_to_update:
+                console.print(f"Memperbarui {len(interfaces_to_update)} interface...")
+                try:
+                    res = requests.patch(f"{self.nb_url}/dcim/interfaces/", headers=self.headers, json=interfaces_to_update)
+                    if res.status_code != 200:
+                        console.print(f"[bold red]Gagal bulk patch interface: {res.status_code} {res.text}[/bold red]")
+                except Exception as e:
+                     console.print(f"[bold red]Error bulk patch interface: {e}[/bold red]")
+            
+            # 4. Re-fetch all interfaces to build a complete map for the next step
+            final_interface_map = {}
+            try:
+                url = f"{self.nb_url}/dcim/interfaces/?device_id={device_id}&limit=1000"
+                while url:
+                    res = requests.get(url, headers=self.headers)
+                    res.raise_for_status()
+                    for iface in res.json().get('results', []):
+                        final_interface_map[iface['name']] = iface['id']
+                    url = res.json().get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal mengambil ulang data interface dari NetBox: {e}[/bold red]")
+
+            return final_interface_map
+
+
     def sync_vlans_to_netbox(self):
-        vlan_data = {}
-        with console.status("[bold yellow]Sinkronisasi VLAN ke NetBox...[/bold yellow]"):
+        with console.status("[bold yellow]Sinkronisasi VLAN ke NetBox (Bulk)...[/bold yellow]"):
+            # 1. Get all existing VLANs from NetBox
+            existing_nb_vlans = set()
+            try:
+                url = f"{self.nb_url}/ipam/vlans/?limit=1000"
+                while url:
+                    res = requests.get(url, headers=self.headers)
+                    res.raise_for_status()
+                    res_json = res.json()
+                    for vlan in res_json.get('results', []):
+                        existing_nb_vlans.add(vlan['vid'])
+                    url = res_json.get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal mengambil data VLAN dari NetBox: {e}[/bold red]")
+                return {}
+
+            # 2. Get all VLANs from router
+            vlan_data = {}
+            vlans_to_create = []
             vlan_raw = self.run_ssh("/interface vlan print terse without-paging")
             for line in vlan_raw.splitlines():
                 name = self.extract_value("name", line)
-                vid = self.extract_value("vlan-id", line)
-                if name and vid:
-                    vid = int(vid)
+                vid_str = self.extract_value("vlan-id", line)
+                if name and vid_str:
+                    vid = int(vid_str)
                     vlan_data[name] = vid
-                    try:
-                        res = requests.get(f"{self.nb_url}/ipam/vlans/?vid={vid}&name={name}", headers=self.headers).json()
-                        if res.get('count', 0) == 0:
-                            payload = {"name": name, "vid": vid, "status": "active", "description": "Auto-created by TUIBOX"}
-                            requests.post(f"{self.nb_url}/ipam/vlans/", headers=self.headers, json=payload)
-                    except: pass
+                    # 3. Compare and add to create list
+                    if vid not in existing_nb_vlans:
+                        vlans_to_create.append({
+                            "name": name,
+                            "vid": vid,
+                            "status": "active",
+                            "description": "Auto-created by TUIBOX"
+                        })
+                        # Add to set to prevent duplicate adds in same run
+                        existing_nb_vlans.add(vid)
+            
+            # 4. Bulk create
+            if vlans_to_create:
+                console.print(f"Menciptakan {len(vlans_to_create)} VLAN baru di NetBox...")
+                try:
+                    res = requests.post(f"{self.nb_url}/ipam/vlans/", headers=self.headers, json=vlans_to_create)
+                    if res.status_code != 201:
+                        console.print(f"[bold red]Gagal bulk create VLAN: {res.status_code} - {res.text}[/bold red]")
+                except Exception as e:
+                    console.print(f"[bold red]Error bulk create VLAN: {e}[/bold red]")
+        
         return vlan_data
 
     def sync_prefixes_to_netbox(self):
-        with console.status("[bold yellow]Menyelaraskan Prefix ke NetBox...[/bold yellow]"):
-            for p in self.prefixes_input:
+        with console.status("[bold yellow]Menyelaraskan Prefix ke NetBox (Bulk)...[/bold yellow]"):
+            # 1. Get all existing prefixes from NetBox
+            existing_nb_prefixes = set()
+            try:
+                url = f"{self.nb_url}/ipam/prefixes/?limit=1000"
+                while url:
+                    res = requests.get(url, headers=self.headers)
+                    res.raise_for_status()
+                    res_json = res.json()
+                    for prefix in res_json.get('results', []):
+                        existing_nb_prefixes.add(prefix['prefix'])
+                    url = res_json.get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal mengambil data Prefix dari NetBox: {e}[/bold red]")
+                return
+
+            # 2. Compare with user input and collect new ones
+            prefixes_to_create = []
+            for p_str in self.prefixes_input:
                 try:
-                    cidr = str(ipaddress.ip_network(p, strict=False))
-                    res = requests.get(f"{self.nb_url}/ipam/prefixes/?prefix={cidr}", headers=self.headers).json()
-                    if res['count'] == 0:
-                        payload = {"prefix": cidr, "status": "active", "description": "Auto-created by TUIBOX"}
-                        requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json=payload)
-                except: pass
+                    cidr = str(ipaddress.ip_network(p_str, strict=False))
+                    if cidr not in existing_nb_prefixes:
+                        prefixes_to_create.append({
+                            "prefix": cidr,
+                            "status": "active",
+                            "description": "Auto-created by TUIBOX"
+                        })
+                        existing_nb_prefixes.add(cidr) # Avoid duplicates in same run
+                except ValueError:
+                    console.print(f"[bold red]Prefix tidak valid di input: '{p_str}'[/bold red]")
+            
+            # 3. Bulk create
+            if prefixes_to_create:
+                console.print(f"Menciptakan {len(prefixes_to_create)} Prefix baru di NetBox...")
+                try:
+                    res = requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json=prefixes_to_create)
+                    if res.status_code != 201:
+                        console.print(f"[bold red]Gagal bulk create Prefix: {res.status_code} - {res.text}[/bold red]")
+                except Exception as e:
+                    console.print(f"[bold red]Error bulk create Prefix: {e}[/bold red]")
 
     def ip_in_prefixes(self, ip_str):
         try:
@@ -134,7 +411,14 @@ class TuiBoxSync:
 
     def scan_and_sync(self):
         waktu_skrg = self.get_now()
-        w_pendek = self.get_short_time() # Ambil format pendek (contoh: 13/03 10:45)
+        w_pendek = self.get_short_time()
+        
+        device_id = self.sync_device_to_netbox()
+        if not device_id:
+            console.print("[bold red]Gagal sinkronisasi device, proses utama dibatalkan.[/bold red]")
+            return
+        
+        interface_map = self.sync_interfaces_to_netbox(device_id)
         
         vlan_map = self.sync_vlans_to_netbox()
         self.sync_prefixes_to_netbox()
@@ -186,8 +470,7 @@ class TuiBoxSync:
                     mac, if_name = mac.upper(), self.extract_value("interface", line) or "N/A"
                     if self.ip_in_prefixes(ip) and ip not in live_devices: live_devices[ip] = {"mac": mac, "src": f"Neighbor ({if_name})", "if": if_name}
 
-        added, updated, inactive, errors = 0, 0, 0, 0
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console) as progress:
+        with console.status("[bold yellow]Menganalisis perbedaan dengan NetBox...[/bold yellow]"):
             nb_ips = {}
             try:
                 url = f"{self.nb_url}/ipam/ip-addresses/?limit=1000"
@@ -200,59 +483,98 @@ class TuiBoxSync:
                     url = res_json.get('next')
             except Exception as e:
                 console.print(f"[bold red]Gagal mengambil data dari NetBox: {e}[/bold red]")
+                return
 
-            task = progress.add_task("[green]Updating NetBox...", total=len(live_devices) + len(nb_ips))
+            ips_to_create = []
+            ips_to_update = []
+            ips_to_deprecate = []
             seen_in_scan = set()
 
             for ip, data in live_devices.items():
                 seen_in_scan.add(ip)
                 if_name = data.get('if', 'N/A')
                 vlan_info = f"VLAN: {vlan_map.get(if_name, 'None')}"
-                
-                # Base Info tanpa timestamp
                 base_info = f"MAC: {data['mac']} | {vlan_info} | IF: {if_name} | Src: {data['src']}"
+                
+                # --- LOGIC TO ASSIGN IP TO INTERFACE ---
+                assignment = {}
+                if ip in ip_to_if:
+                    router_if_name = ip_to_if[ip]
+                    router_if_id = interface_map.get(router_if_name)
+                    if router_if_id:
+                        assignment = {
+                            "assigned_object_type": "dcim.interface",
+                            "assigned_object_id": router_if_id
+                        }
+                # --- END LOGIC ---
 
                 if ip in nb_ips:
-                    # Update jika IP berubah status dari mati ke hidup, atau ganti MAC/Interface
-                    if nb_ips[ip]['status'] != 'active' or data['mac'] not in nb_ips[ip]['desc'] or if_name not in nb_ips[ip]['desc']:
-                        # Bersihkan tag lama, tambahkan tag [UP] dengan waktu sekarang
+                    needs_update = False
+                    current_nb_ip = nb_ips[ip]
+                    if current_nb_ip['status'] != 'active':
+                        needs_update = True
+                    if not all(x in current_nb_ip['desc'] for x in [data['mac'], if_name]):
+                        needs_update = True
+
+                    if needs_update:
                         final_desc = f"[UP: {w_pendek}] {base_info}"[:200]
-                        res = requests.patch(f"{self.nb_url}/ipam/ip-addresses/{nb_ips[ip]['id']}/", headers=self.headers, json={"status": "active", "description": final_desc})
-                        if res.status_code in [200, 201]:
-                            updated += 1
-                            console.print(f"[yellow][UPDATE][/yellow] IP {ip} is now UP (MAC: {data['mac']})")
-                        else:
-                            errors += 1
-                    # Jika tidak ada perubahan, tidak usah dipatch agar changelog NetBox tetap bersih
+                        update_payload = {"id": current_nb_ip['id'], "status": "active", "description": final_desc}
+                        update_payload.update(assignment) # Add assignment if applicable
+                        ips_to_update.append(update_payload)
                 else:
                     matched_prefix = "24"
                     for p in self.prefixes_input:
-                        if ipaddress.ip_address(ip) in ipaddress.ip_network(p, strict=False): matched_prefix = p.split('/')[1]; break
-                    
+                        if ipaddress.ip_address(ip) in ipaddress.ip_network(p, strict=False):
+                            matched_prefix = p.split('/')[1]
+                            break
                     final_desc = f"[NEW: {w_pendek}] {base_info}"[:200]
-                    res = requests.post(f"{self.nb_url}/ipam/ip-addresses/", headers=self.headers, json={"address": f"{ip}/{matched_prefix}", "status": "active", "description": final_desc})
-                    if res.status_code == 201:
-                        added += 1
-                        console.print(f"[green][NEW IP][/green] Found {ip} ({data['mac']})")
-                    else:
-                        errors += 1
-                progress.advance(task)
+                    create_payload = {"address": f"{ip}/{matched_prefix}", "status": "active", "description": final_desc}
+                    create_payload.update(assignment) # Add assignment if applicable
+                    ips_to_create.append(create_payload)
 
             for ip, data in nb_ips.items():
                 if ip not in seen_in_scan and data['status'] == 'active':
-                    # Bersihkan tag waktu lama (NEW/UP), ganti dengan tag OFF
                     clean_desc = re.sub(r'^\[.*?\]\s*', '', data['desc'])
                     final_desc = f"[OFF: {w_pendek}] {clean_desc}"[:200]
-                    
-                    res = requests.patch(f"{self.nb_url}/ipam/ip-addresses/{data['id']}/", headers=self.headers, json={"status": "deprecated", "description": final_desc})
-                    if res.status_code in [200, 201]:
-                        inactive += 1
-                        console.print(f"[red][OFFLINE][/red] IP {ip} is no longer detected")
-                progress.advance(task)
+                    ips_to_deprecate.append({"id": data['id'], "status": "deprecated", "description": final_desc})
+        
+        errors = 0
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console) as progress:
+            task_create = progress.add_task("[green]Menyiapkan IP baru...", total=1)
+            task_update = progress.add_task("[yellow]Menyiapkan update IP...", total=1)
+            task_deprecate = progress.add_task("[red]Menyiapkan IP offline...", total=1)
+
+            if ips_to_create:
+                progress.update(task_create, description=f"[green]Mengirim {len(ips_to_create)} IP baru...")
+                try:
+                    res = requests.post(f"{self.nb_url}/ipam/ip-addresses/", headers=self.headers, json=ips_to_create)
+                    if res.status_code != 201:
+                        console.print(f"[bold red] Gagal bulk create: {res.status_code} - {res.text}[/bold red]")
+                        errors += len(ips_to_create)
+                except Exception as e:
+                    console.print(f"[bold red] Error bulk create: {e}[/bold red]")
+                    errors += len(ips_to_create)
+            progress.update(task_create, completed=1, description="[green]Selesai membuat IP baru.")
+
+            all_updates = ips_to_update + ips_to_deprecate
+            if all_updates:
+                progress.update(task_update, description=f"[yellow]Mengirim {len(all_updates)} update...")
+                try:
+                    res = requests.patch(f"{self.nb_url}/ipam/ip-addresses/", headers=self.headers, json=all_updates)
+                    if res.status_code != 200:
+                        console.print(f"[bold red] Gagal bulk patch: {res.status_code} - {res.text}[/bold red]")
+                        errors += len(all_updates)
+                except Exception as e:
+                    console.print(f"[bold red] Error bulk patch: {e}[/bold red]")
+                    errors += len(all_updates)
+            
+            progress.update(task_update, completed=1, description="[yellow]Selesai memperbarui IP.")
+            progress.update(task_deprecate, completed=1, description="[red]Selesai memproses IP offline.")
+
 
         console.print(f"\n[bold green]✔ Sinkronisasi Selesai![/bold green]")
         console.print(f"Total IP Live di Router: [bold cyan]{len(live_devices)}[/bold cyan]")
-        console.print(f"IP Baru: [bold green]{added}[/bold green] | IP Update: [bold yellow]{updated}[/bold yellow] | IP Offline: [bold red]{inactive}[/bold red] | Gagal API: [bold red]{errors}[/bold red]")
+        console.print(f"IP Baru: [bold green]{len(ips_to_create)}[/bold green] | IP Update: [bold yellow]{len(ips_to_update)}[/bold yellow] | IP Offline: [bold red]{len(ips_to_deprecate)}[/bold red] | Gagal API: [bold red]{errors}[/bold red]")
 
 if __name__ == "__main__":
     sync = TuiBoxSync()
