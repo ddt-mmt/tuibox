@@ -4,11 +4,22 @@ import re
 import subprocess
 import getpass
 import sys
+import os
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 console = Console()
+
+# --- BACA BRANKAS RAHASIA (.env) ---
+# Ini akan membaca file .env di folder yang sama agar token tidak terlihat di kode
+if os.path.exists('.env'):
+    with open('.env') as f:
+        for line in f:
+            if '=' in line and not line.startswith(('#', '\n')):
+                key, val = line.strip().split('=', 1)
+                os.environ[key] = val
 
 class KvmNetboxSync:
     def __init__(self):
@@ -22,21 +33,36 @@ class KvmNetboxSync:
         self.headers = {}
 
     def setup(self):
-        console.print(Panel("[bold blue]🌟 TUIBOX: KVM to NetBox VM Sync (V14 - AUTO IP MAP) 🌟[/bold blue]", expand=False))
-        
-        self.host = input("🌐 IP Server KVM (ex: 10.28.14.87): ").strip()
+        console.print(Panel("[bold blue]🌟 TUIBOX: KVM to NetBox VM Sync (V15 - SECURE & AUTO IP) 🌟[/bold blue]", expand=False))
+
+        # Ambil default dari Environment Variable (.env), kosongkan jika tidak ada
+        def_host = os.getenv("KVM_HOST", "127.0.0.1")
+        def_user = os.getenv("KVM_USER", "root")
+        def_nb_url = os.getenv("NETBOX_URL", "http://localhost:8001/api")
+        def_nb_token = os.getenv("NETBOX_TOKEN", "")
+
+        self.host = input(f"🌐 IP Server KVM ({def_host}): ").strip() or def_host
         self.port = input("🔌 Port SSH (Default 22): ").strip() or "22"
-        self.user = input("👤 Username (ex: root): ").strip() or "root"
-        self.password = getpass.getpass("🔑 Password: ")
+        self.user = input(f"👤 Username ({def_user}): ").strip() or def_user
+        self.password = getpass.getpass("🔑 Password (Hidden): ")
+
+        self.nb_url = input(f"🔗 URL NetBox ({def_nb_url}): ").strip() or def_nb_url
         
-        default_nb = "http://10.28.1.100:8001/api"
-        self.nb_url = input(f"🔗 URL NetBox (Default: {default_nb}): ").strip() or default_nb
-        self.nb_token = input("🎫 API Token (Default: 6a51599f642c2a3baadf8c62f8aa1e8c3fead6b1): ").strip() or "6a51599f642c2a3baadf8c62f8aa1e8c3fead6b1"
+        # Logika proteksi token: tidak ditampilkan di prompt layar
+        if def_nb_token:
+            use_env_token = input("🎫 Gunakan API Token dari .env? [Y/n]: ").strip().lower()
+            if use_env_token == 'n':
+                self.nb_token = getpass.getpass("🎫 Masukkan API Token Baru (Hidden): ").strip()
+            else:
+                self.nb_token = def_nb_token
+        else:
+            self.nb_token = getpass.getpass("🎫 API Token (Hidden): ").strip()
+
         self.cluster_name = input("🏢 Nama Cluster di NetBox (ex: vm-keruing03): ").strip() or "vm-keruing03"
 
         self.headers = {
-            "Authorization": f"Token {self.nb_token}", 
-            "Content-Type": "application/json", 
+            "Authorization": f"Token {self.nb_token}",
+            "Content-Type": "application/json",
             "Accept": "application/json"
         }
 
@@ -45,7 +71,7 @@ class KvmNetboxSync:
         try:
             result = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, timeout=30)
             return result.stdout if result.returncode == 0 else ""
-        except: 
+        except:
             return ""
 
     def get_or_create_cluster(self):
@@ -64,7 +90,7 @@ class KvmNetboxSync:
     def sync_vms(self):
         console.print("\n[bold yellow]1. Mengambil daftar VM dari Server...[/bold yellow]")
         raw_list = self.run_ssh("virsh list --all")
-        
+
         if not raw_list or "Name" not in raw_list:
             console.print("[bold red]❌ Gagal mengambil data via SSH. Pastikan sshpass terinstall dan password benar.[/bold red]")
             return
@@ -73,7 +99,7 @@ class KvmNetboxSync:
         for line in raw_list.splitlines():
             line = line.strip()
             if not line or "---" in line or " Id " in line: continue
-            
+
             m = re.match(r'^\s*([-\d]+)\s+(.+?)\s{2,}([a-zA-Z\s]+)$', line)
             if m:
                 vm_list.append({"name": m.group(2).strip(), "status": m.group(3).strip().lower()})
@@ -84,7 +110,7 @@ class KvmNetboxSync:
         added, updated, ip_mapped = 0, 0, 0
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console) as progress:
             task = progress.add_task("[cyan]Menganalisa CPU, RAM, Disk & Auto-Mapping IP...", total=len(vm_list))
-            
+
             for vm in vm_list:
                 vm_name = vm['name']
                 nb_status = "active" if "running" in vm['status'] else "offline"
@@ -92,7 +118,7 @@ class KvmNetboxSync:
                 dominfo = self.run_ssh(f"virsh dominfo '{vm_name}'")
                 cpu_m = re.search(r'CPU\(s\):\s+(\d+)', dominfo)
                 mem_m = re.search(r'Max memory:\s+(\d+)\s+kB', dominfo)
-                
+
                 vcpus = float(cpu_m.group(1)) if cpu_m else 1.0
                 memory_mb = int(mem_m.group(1)) // 1024 if mem_m else 1024
 
@@ -128,7 +154,7 @@ class KvmNetboxSync:
                 for idx, mac in enumerate(macs):
                     mac = mac.upper()
                     iface_name = f"eth{idx}"
-                    
+
                     # Buat/Cek Interface VM
                     if_check = requests.get(f"{self.nb_url}/virtualization/interfaces/?virtual_machine_id={vm_id}&name={iface_name}", headers=self.headers).json()
                     if if_check['count'] == 0:
@@ -139,20 +165,18 @@ class KvmNetboxSync:
                         iface_id = if_check['results'][0]['id']
 
                     # --- MAGIC HAPPENS HERE: AUTO MAP IP ---
-                    # Cari di IPAM NetBox apakah ada IP dengan MAC ini di deskripsinya
                     ip_search = requests.get(f"{self.nb_url}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
                     if ip_search['count'] > 0:
                         ip_data = ip_search['results'][0]
                         ip_id = ip_data['id']
                         ip_address = ip_data['address']
-                        
-                        # Jika IP belum tertempel ke interface ini, tempelkan sekarang!
+
                         if not ip_data.get('assigned_object_id') == iface_id:
                             requests.patch(f"{self.nb_url}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={
                                 "assigned_object_type": "virtualization.vminterface",
                                 "assigned_object_id": iface_id
                             })
-                        
+
                         primary_ip_id = ip_id # Simpan untuk dijadikan Primary IP VM
                         console.print(f"  [cyan]🔗 Mapped IP [bold]{ip_address}[/bold] to {vm_name} ({iface_name})[/cyan]")
                         ip_mapped += 1
