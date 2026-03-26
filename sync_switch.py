@@ -5,6 +5,10 @@ import re
 import getpass
 import sys
 import os
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
 
 # ==========================================
 # BACA BRANKAS RAHASIA (.env)
@@ -15,8 +19,11 @@ if os.path.exists('.env'):
             if '=' in line and not line.startswith(('#', '\n')):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
+else:
+    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
+    sys.exit(1)
 
-print("\n🌟 NETBOX ALL-IN-ONE SYNC TOOL (SWITCH/ROUTER EDITION) 🌟")
+console.print("\n🌟 NETBOX ALL-IN-ONE SYNC TOOL (SWITCH/ROUTER EDITION) 🌟")
 print("------------------------------------------------------------")
 
 # Ambil URL dan Token dari .env (Otomatis hapus '/api' di ujung jika ada)

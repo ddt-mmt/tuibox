@@ -4,6 +4,7 @@ import re
 import subprocess
 import os
 import json
+import sys # Added sys import
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -16,6 +17,9 @@ if os.path.exists('.env'):
             if '=' in line and not line.startswith(('#', '\n')):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
+else: # Added else block
+    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
+    sys.exit(1)
 
 class ProxmoxNetboxSync:
     def __init__(self):
