@@ -13,7 +13,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 console = Console()
 
 # --- BACA BRANKAS RAHASIA (.env) ---
-# Ini akan membaca file .env di folder yang sama agar token tidak terlihat di kode
 if os.path.exists('.env'):
     with open('.env') as f:
         for line in f:
@@ -33,9 +32,8 @@ class KvmNetboxSync:
         self.headers = {}
 
     def setup(self):
-        console.print(Panel("[bold blue]🌟 TUIBOX: KVM to NetBox VM Sync (V15 - SECURE & AUTO IP) 🌟[/bold blue]", expand=False))
+        console.print(Panel("[bold blue]🌟 TUIBOX: KVM to NetBox VM Sync (V16 - PERFECT SPECS) 🌟[/bold blue]", expand=False))
 
-        # Ambil default dari Environment Variable (.env), kosongkan jika tidak ada
         def_host = os.getenv("KVM_HOST", "127.0.0.1")
         def_user = os.getenv("KVM_USER", "root")
         def_nb_url = os.getenv("NETBOX_URL", "http://localhost:8001/api")
@@ -48,7 +46,6 @@ class KvmNetboxSync:
 
         self.nb_url = input(f"🔗 URL NetBox ({def_nb_url}): ").strip() or def_nb_url
         
-        # Logika proteksi token: tidak ditampilkan di prompt layar
         if def_nb_token:
             use_env_token = input("🎫 Gunakan API Token dari .env? [Y/n]: ").strip().lower()
             if use_env_token == 'n':
@@ -117,12 +114,14 @@ class KvmNetboxSync:
 
                 dominfo = self.run_ssh(f"virsh dominfo '{vm_name}'")
                 cpu_m = re.search(r'CPU\(s\):\s+(\d+)', dominfo)
-                mem_m = re.search(r'Max memory:\s+(\d+)\s+kB', dominfo)
+                # FIX MEMORY: Hapus batasan "kB" agar match dengan semua output KVM
+                mem_m = re.search(r'Max memory:\s+(\d+)', dominfo)
 
                 vcpus = float(cpu_m.group(1)) if cpu_m else 1.0
                 memory_mb = int(mem_m.group(1)) // 1024 if mem_m else 1024
 
-                disk_gb = 0
+                # FIX DISK: Ubah kalkulasi ke Megabytes (MB)
+                disk_mb = 0
                 blklist = self.run_ssh(f"virsh domblklist '{vm_name}'")
                 for blk_line in blklist.splitlines():
                     if "Target" in blk_line or "---" in blk_line or not blk_line.strip(): continue
@@ -131,11 +130,12 @@ class KvmNetboxSync:
                         target = parts[0]
                         blkinfo = self.run_ssh(f"virsh domblkinfo '{vm_name}' {target}")
                         cap_m = re.search(r'Capacity:\s+(\d+)', blkinfo)
-                        if cap_m: disk_gb += int(cap_m.group(1)) // (1024**3)
+                        # NetBox API meminta ukuran Disk dalam Megabytes (MB)
+                        if cap_m: disk_mb += int(cap_m.group(1)) // (1024**2) 
 
                 vm_check = requests.get(f"{self.nb_url}/virtualization/virtual-machines/?name={vm_name}&cluster_id={cluster_id}", headers=self.headers).json()
                 vm_payload = {"name": vm_name, "cluster": cluster_id, "status": nb_status, "vcpus": vcpus, "memory": memory_mb}
-                if disk_gb > 0: vm_payload["disk"] = disk_gb
+                if disk_mb > 0: vm_payload["disk"] = disk_mb
 
                 if vm_check['count'] == 0:
                     res_vm = requests.post(f"{self.nb_url}/virtualization/virtual-machines/", headers=self.headers, json=vm_payload).json()
@@ -155,7 +155,6 @@ class KvmNetboxSync:
                     mac = mac.upper()
                     iface_name = f"eth{idx}"
 
-                    # Buat/Cek Interface VM
                     if_check = requests.get(f"{self.nb_url}/virtualization/interfaces/?virtual_machine_id={vm_id}&name={iface_name}", headers=self.headers).json()
                     if if_check['count'] == 0:
                         iface_id = requests.post(f"{self.nb_url}/virtualization/interfaces/", headers=self.headers, json={
@@ -164,24 +163,19 @@ class KvmNetboxSync:
                     else:
                         iface_id = if_check['results'][0]['id']
 
-                    # --- MAGIC HAPPENS HERE: AUTO MAP IP ---
                     ip_search = requests.get(f"{self.nb_url}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
                     if ip_search['count'] > 0:
                         ip_data = ip_search['results'][0]
                         ip_id = ip_data['id']
-                        ip_address = ip_data['address']
-
+                        
                         if not ip_data.get('assigned_object_id') == iface_id:
                             requests.patch(f"{self.nb_url}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={
                                 "assigned_object_type": "virtualization.vminterface",
                                 "assigned_object_id": iface_id
                             })
 
-                        primary_ip_id = ip_id # Simpan untuk dijadikan Primary IP VM
-                        console.print(f"  [cyan]🔗 Mapped IP [bold]{ip_address}[/bold] to {vm_name} ({iface_name})[/cyan]")
-                        ip_mapped += 1
+                        primary_ip_id = ip_id
 
-                # Set Primary IP ke VM jika ditemukan
                 if primary_ip_id:
                     requests.patch(f"{self.nb_url}/virtualization/virtual-machines/{vm_id}/", headers=self.headers, json={
                         "primary_ip4": primary_ip_id
