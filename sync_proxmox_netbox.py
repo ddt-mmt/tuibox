@@ -4,12 +4,50 @@ import re
 import subprocess
 import os
 import json
-import sys # Added sys import
+import sys
+import getpass # Added getpass import
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 console = Console()
+
+# Function to get environment variables interactively
+def get_env_variables_interactively():
+    console.print(Panel("[bold yellow]🚨 File konfigurasi (.env) tidak ditemukan.[/bold yellow]\n[cyan]Memasuki mode interaktif untuk menginput konfigurasi.[/cyan]\n[dim]Anda dapat membuat file .env secara manual nanti.[/dim]", expand=False))
+
+    # Using input() for actual input, console.render_str for preceding messages
+    pve_host = input(console.render_str("[bold cyan]Masukkan PVE_HOST (Proxmox Host):[/bold cyan] ")).strip()
+    pve_user = input(console.render_str(f"[bold cyan]Masukkan PVE_USER (default: root):[/bold cyan] ")).strip() or "root"
+    pve_pass = getpass.getpass(console.render_str("[bold cyan]Masukkan PVE_PASS (Proxmox Password):[/bold cyan] ")).strip()
+    netbox_url = input(console.render_str("[bold cyan]Masukkan NETBOX_URL (contoh: http://netbox.example.com):[/bold cyan] ")).strip()
+    netbox_token = input(console.render_str("[bold cyan]Masukkan NETBOX_TOKEN:[/bold cyan] ")).strip()
+    pve_cluster = input(console.render_str(f"[bold cyan]Masukkan PVE_CLUSTER (default: Proxmox-Cluster):[/bold cyan] ")).strip() or "Proxmox-Cluster"
+
+    # Set environment variables
+    os.environ["PVE_HOST"] = pve_host
+    os.environ["PVE_USER"] = pve_user
+    os.environ["PVE_PASS"] = pve_pass
+    os.environ["NETBOX_URL"] = netbox_url
+    os.environ["NETBOX_TOKEN"] = netbox_token
+    os.environ["PVE_CLUSTER"] = pve_cluster
+
+    console.print(Panel("[bold green]✅ Konfigurasi berhasil diinput secara interaktif.[/bold green]\n[dim]Anda dapat menjalankan skrip ini lagi setelah membuat file .env untuk menghindari input interaktif.[/dim]", expand=False))
+    
+    # Optionally save to .env
+    save_to_env = input(console.render_str("[bold yellow]Apakah Anda ingin menyimpan konfigurasi ini ke file .env? (y/N):[/bold yellow] ")).strip().lower()
+    if save_to_env == 'y':
+        try:
+            with open('.env', 'w') as f:
+                f.write(f"PVE_HOST={pve_host}\n")
+                f.write(f"PVE_USER={pve_user}\n")
+                f.write(f"PVE_PASS={pve_pass}\n")
+                f.write(f"NETBOX_URL={netbox_url}\n")
+                f.write(f"NETBOX_TOKEN={netbox_token}\n")
+                f.write(f"PVE_CLUSTER={pve_cluster}\n")
+            console.print("[bold green]File .env berhasil dibuat dengan konfigurasi yang disimpan.[/bold green]")
+        except IOError:
+            console.print(Panel("[bold red]❌ Gagal menyimpan file .env. Periksa izin penulisan.[/bold red]", expand=False))
 
 if os.path.exists('.env'):
     with open('.env') as f:
@@ -17,9 +55,8 @@ if os.path.exists('.env'):
             if '=' in line and not line.startswith(('#', '\n')):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
-else: # Added else block
-    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
-    sys.exit(1)
+else: # Original else block, replaced with interactive input
+    get_env_variables_interactively()
 
 class ProxmoxNetboxSync:
     def __init__(self):
@@ -132,7 +169,7 @@ class ProxmoxNetboxSync:
 
                 progress.advance(task)
 
-        console.print(f"\n[bold green]✅ V23 DEPLOYED! vCPU & RAM harusnya sudah akurat sekarang Mas.[/bold green]")
+        console.print(f"\n[bold green]✅ Sinkronisasi Selesai: {len(resources)} resource (VM/LXC) berhasil disinkronisasi.[/bold green]")
 
 if __name__ == "__main__":
     app = ProxmoxNetboxSync()

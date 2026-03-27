@@ -19,9 +19,6 @@ if os.path.exists('.env'):
             if '=' in line and not line.startswith(('#', '\n')):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
-else:
-    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
-    sys.exit(1)
 
 class KvmNetboxSync:
     def __init__(self):
@@ -186,7 +183,7 @@ class KvmNetboxSync:
 
                 progress.advance(task)
 
-        console.print(f"\n[bold green]✨ Selesai! Baru: {added}, Update: {updated}, IP Otomatis Tertempel: {ip_mapped}[/bold green]")
+        console.print(f"\n[bold green]✨ Sinkronisasi Selesai: {added} VM baru dibuat, {updated} VM diperbarui, {ip_mapped} IP termapping otomatis.[/bold green]")
 
 if __name__ == "__main__":
     app = KvmNetboxSync()

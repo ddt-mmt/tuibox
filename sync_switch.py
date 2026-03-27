@@ -19,9 +19,6 @@ if os.path.exists('.env'):
             if '=' in line and not line.startswith(('#', '\n')):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
-else:
-    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
-    sys.exit(1)
 
 console.print("\n🌟 NETBOX ALL-IN-ONE SYNC TOOL (SWITCH/ROUTER EDITION) 🌟")
 print("------------------------------------------------------------")
@@ -213,7 +210,11 @@ try:
             if v['ip'] == IP_ADDR: dev.primary_ip4 = nb_ip.id; dev.save()
         except: pass
 
-    print(f"\n✨ SINKRONISASI SELESAI!")
+    print(f"\n✨ Sinkronisasi Selesai: {len(ports_data)} port fisik dan {len(l3_data)} interface L3 berhasil disinkronisasi.")
 
+except KeyboardInterrupt:
+    console.print("\n[yellow]Proses dibatalkan oleh pengguna.[/yellow]")
+    sys.exit(0)
 except Exception as e:
-    print(f"❌ ERROR: {e}")
+    console.print(f"[bold red]❌ Terjadi kesalahan: {e}[/bold red]")
+    sys.exit(1)

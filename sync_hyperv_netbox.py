@@ -4,7 +4,47 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
+import getpass # Import getpass for secure password input
+
 console = Console()
+
+# Function to get environment variables interactively
+def get_env_variables_interactively():
+    console.print(Panel("[bold yellow]🚨 File konfigurasi (.env) tidak ditemukan.[/bold yellow]\n[cyan]Memasuki mode interaktif untuk menginput konfigurasi.[/cyan]\n[dim]Anda dapat membuat file .env secara manual nanti.[/dim]", expand=False))
+
+    # Using input() for actual input, console.render_str for preceding messages
+    hyperv_host = input(console.render_str("[bold cyan]Masukkan HYPERV_HOST:[/bold cyan] ")).strip()
+    hyperv_user = input(console.render_str(f"[bold cyan]Masukkan HYPERV_USER (default: Administrator):[/bold cyan] ")).strip() or "Administrator"
+    hyperv_pass = getpass.getpass(console.render_str("[bold cyan]Masukkan HYPERV_PASS:[/bold cyan] ")).strip()
+    netbox_url = input(console.render_str("[bold cyan]Masukkan NETBOX_URL (contoh: http://netbox.example.com):[/bold cyan] ")).strip()
+    netbox_token = input(console.render_str("[bold cyan]Masukkan NETBOX_TOKEN:[/bold cyan] ")).strip()
+    hyperv_cluster = input(console.render_str(f"[bold cyan]Masukkan HYPERV_CLUSTER (default: HyperV-Cluster):[/bold cyan] ")).strip() or "HyperV-Cluster"
+
+    # Set environment variables
+    os.environ["HYPERV_HOST"] = hyperv_host
+    os.environ["HYPERV_USER"] = hyperv_user
+    os.environ["HYPERV_PASS"] = hyperv_pass
+    os.environ["NETBOX_URL"] = netbox_url
+    os.environ["NETBOX_TOKEN"] = netbox_token
+    os.environ["HYPERV_CLUSTER"] = hyperv_cluster
+
+    console.print(Panel("[bold green]✅ Konfigurasi berhasil diinput secara interaktif.[/bold green]\n[dim]Anda dapat menjalankan skrip ini lagi setelah membuat file .env untuk menghindari input interaktif.[/dim]", expand=False))
+    
+    # Optionally save to .env
+    save_to_env = input(console.render_str("[bold yellow]Apakah Anda ingin menyimpan konfigurasi ini ke file .env? (y/N):[/bold yellow] ")).strip().lower()
+    if save_to_env == 'y':
+        try:
+            with open('.env', 'w') as f:
+                f.write(f"HYPERV_HOST={hyperv_host}\n")
+                f.write(f"HYPERV_USER={hyperv_user}\n")
+                f.write(f"HYPERV_PASS={hyperv_pass}\n")
+                f.write(f"NETBOX_URL={netbox_url}\n")
+                f.write(f"NETBOX_TOKEN={netbox_token}\n")
+                f.write(f"HYPERV_CLUSTER={hyperv_cluster}\n")
+            console.print("[bold green]File .env berhasil dibuat dengan konfigurasi yang disimpan.[/bold green]")
+        except IOError:
+            console.print(Panel("[bold red]❌ Gagal menyimpan file .env. Periksa izin penulisan.[/bold red]", expand=False))
+
 
 # --- BACA KONFIGURASI (.env) ---
 if os.path.exists('.env'):
@@ -14,8 +54,7 @@ if os.path.exists('.env'):
                 key, val = line.strip().split('=', 1)
                 os.environ[key] = val
 else:
-    console.print(Panel("[bold red]🚨 ERROR: File konfigurasi (.env) tidak ditemukan![/bold red]\n\n[yellow]Silakan buat file '.env' di direktori yang sama dengan skrip ini.\nAnda bisa menyalin template dari '.env.example' (jika tersedia) atau membuatnya secara manual dengan variabel lingkungan yang diperlukan.[/yellow]\n\n[bold white]Skrip akan berhenti.[/bold white]", expand=False))
-    sys.exit(1)
+    get_env_variables_interactively()
 
 class HyperVNetboxSync:
     def __init__(self):
@@ -133,7 +172,7 @@ class HyperVNetboxSync:
 
                 progress.advance(task)
 
-        console.print(f"\n[bold green]✅ FIX SELESAI! VM Offline sekarang punya spek lengkap.[/bold green]")
+        console.print(f"\n[bold green]✅ Sinkronisasi Selesai: {len(vm_list)} VM berhasil disinkronisasi.[/bold green]")
 
 if __name__ == "__main__":
     HyperVNetboxSync().sync()
