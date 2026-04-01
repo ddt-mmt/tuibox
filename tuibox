@@ -449,6 +449,8 @@ class TuiBoxSync:
                     # Optionally print more details if available in response
                     if 'res' in locals() and hasattr(res, 'text'):
                         console.print(f"[bold red]Response Body: {res.text}[/bold red]")
+                return len(prefixes_to_create) # Return the count of prefixes attempted to create
+            return 0 # Return 0 if no prefixes needed creation
 
     def scan_and_sync(self):
         waktu_skrg = self.get_now()
@@ -606,7 +608,7 @@ class TuiBoxSync:
                     ips_to_deprecate.append({"id": data['id'], "status": "deprecated", "description": final_desc})
 
         # AUTO-CREATE PREFIXES
-        self.ensure_prefixes_exist(list(required_prefixes))
+        added_prefixes_count = self.ensure_prefixes_exist(list(required_prefixes))
 
         
         errors = 0
@@ -646,6 +648,26 @@ class TuiBoxSync:
         console.print(f"\n[bold green]✔ Sinkronisasi Selesai![/bold green]")
         console.print(f"Total IP Live di Router: [bold cyan]{len(live_devices)}[/bold cyan]")
         console.print(f"IP Baru: [bold green]{len(ips_to_create)}[/bold green] | IP Update: [bold yellow]{len(ips_to_update)}[/bold yellow] | IP Offline: [bold red]{len(ips_to_deprecate)}[/bold red] | Gagal API: [bold red]{errors}[/bold red]")
+        console.print(f"Prefix Baru Dibuat: [bold green]{added_prefixes_count}[/bold green]")
+
+if __name__ == "__main__":
+    sync = TuiBoxSync()
+    try:
+        sync.setup()
+        if sync.validate_connection():
+            while True:
+                sync.scan_and_sync()
+                if not sync.auto_sync: break
+                interval_sec = sync.interval * 60
+                console.print(f"\n[bold yellow]Menunggu {sync.interval} menit untuk sinkronisasi berikutnya...[/bold yellow]")
+                for i in range(interval_sec, 0, -1):
+                    if i % 60 == 0 or i <= 5:
+                        sys.stdout.write(f"\rSelanjutnya dalam: {i//60}m {i%60}s  ")
+                        sys.stdout.flush()
+                    time.sleep(1)
+                console.print("\n[bold green]Memulai Sinkronisasi Berkala...[/bold green]")
+    except KeyboardInterrupt: console.print("\n[bold red]Dibatalkan oleh User.[/bold red]")
+    except Exception as e: console.print(f"\n[bold red]Error Fatal:[/bold red] {e}")
 
 if __name__ == "__main__":
     sync = TuiBoxSync()
