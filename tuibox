@@ -409,6 +409,39 @@ class TuiBoxSync:
         except: pass
         return False
 
+    def ensure_prefixes_exist(self, prefix_list):
+        if not prefix_list: return
+        with console.status("[bold yellow]Memastikan Parent Prefix tersedia di NetBox...[/bold yellow]"):
+            existing_nb_prefixes = set()
+            try:
+                url = f"{self.nb_url}/ipam/prefixes/?limit=1000"
+                while url:
+                    res = requests.get(url, headers=self.headers)
+                    res.raise_for_status()
+                    res_json = res.json()
+                    for prefix in res_json.get('results', []):
+                        existing_nb_prefixes.add(prefix['prefix'])
+                    url = res_json.get('next')
+            except Exception as e:
+                console.print(f"[bold red]Gagal memvalidasi Prefix: {e}[/bold red]")
+                return
+
+            prefixes_to_create = []
+            for p_str in prefix_list:
+                if p_str not in existing_nb_prefixes:
+                    prefixes_to_create.append({
+                        "prefix": p_str,
+                        "status": "active",
+                        "description": "Auto-created by TUIBOX Sync"
+                    })
+                    existing_nb_prefixes.add(p_str)
+            
+            if prefixes_to_create:
+                console.print(f"Menciptakan {len(prefixes_to_create)} Parent Prefix baru...")
+                try:
+                    res = requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json=prefixes_to_create)
+                except: pass
+
     def scan_and_sync(self):
         waktu_skrg = self.get_now()
         w_pendek = self.get_short_time()
@@ -426,10 +459,16 @@ class TuiBoxSync:
         console.print(Panel(f"[bold cyan]Memulai Sinkronisasi IPAM[/bold cyan]\nWaktu: {waktu_skrg}", expand=False))
 
         ip_to_if = {}
+        iface_to_mask = {}
         addr_raw = self.run_ssh("/ip address print terse without-paging")
         for line in addr_raw.splitlines():
-            ip, iface = self.extract_value("address", line), self.extract_value("interface", line)
-            if ip and iface: ip_to_if[ip.split('/')[0]] = iface
+            address = self.extract_value("address", line)
+            iface = self.extract_value("interface", line)
+            if address and iface:
+                ip_only = address.split('/')[0]
+                mask = address.split('/')[1]
+                ip_to_if[ip_only] = iface
+                if iface not in iface_to_mask: iface_to_mask[iface] = mask
 
         if self.ping_sweep:
             with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
@@ -439,12 +478,17 @@ class TuiBoxSync:
                         subnets = [net] if net.prefixlen >= 24 else list(net.subnets(new_prefix=24))
                         for i in range(0, len(subnets), 5):
                             batch = subnets[i:i+5]
-                            cmds = [f":for i from=1 to=254 do={{ /tool ping {str(sub.network_address).rsplit('.', 1)[0]}.$i count=1 timeout=5ms }}" for sub in batch]
+                            cmds = [f":for i from=1 to=254 do={{ /tool ping {str(sub.network_address).rsplit('.', 1)[0]}.$i count=1 timeout=50ms }}" for sub in batch]
                             progress.add_task(description=f"Probing {len(batch)} Subnets...", total=None)
                             self.run_ssh(" ; ".join(cmds))
                     except: continue
 
         live_devices = {}
+        # Tambahkan IP Router sendiri ke live_devices agar tidak ter-deprecate
+        for ip, iface in ip_to_if.items():
+            if self.ip_in_prefixes(ip):
+                live_devices[ip] = {"mac": "STATIC-ROUTER", "src": f"Router-Interface ({iface})", "if": iface}
+
         with console.status("[bold yellow]Membedah data ARP, DHCP, Neighbor...[/bold yellow]"):
             arp_raw = self.run_ssh("/ip arp print terse without-paging")
             for line in arp_raw.splitlines():
@@ -479,7 +523,12 @@ class TuiBoxSync:
                     for item in res_json.get('results', []):
                         ip_only = item['address'].split('/')[0]
                         if self.ip_in_prefixes(ip_only):
-                            nb_ips[ip_only] = {"id": item['id'], "desc": item.get('description', '') or '', "status": item['status']['value']}
+                            nb_ips[ip_only] = {
+                                "id": item['id'], 
+                                "full_address": item['address'], 
+                                "desc": item.get('description', '') or '', 
+                                "status": item['status']['value']
+                            }
                     url = res_json.get('next')
             except Exception as e:
                 console.print(f"[bold red]Gagal mengambil data dari NetBox: {e}[/bold red]")
@@ -489,6 +538,7 @@ class TuiBoxSync:
             ips_to_update = []
             ips_to_deprecate = []
             seen_in_scan = set()
+            required_prefixes = set()
 
             for ip, data in live_devices.items():
                 seen_in_scan.add(ip)
@@ -508,28 +558,38 @@ class TuiBoxSync:
                         }
                 # --- END LOGIC ---
 
+                # Determine mask
+                matched_mask = "24"
+                if if_name in iface_to_mask:
+                    matched_mask = iface_to_mask[if_name]
+                else:
+                    for p in self.prefixes_input:
+                        if ipaddress.ip_address(ip) in ipaddress.ip_network(p, strict=False):
+                            matched_mask = p.split('/')[1]
+                            break
+                
+                full_addr = f"{ip}/{matched_mask}"
+                try:
+                    network = ipaddress.ip_network(full_addr, strict=False)
+                    required_prefixes.add(str(network))
+                except: pass
+
                 if ip in nb_ips:
-                    needs_update = False
                     current_nb_ip = nb_ips[ip]
-                    if current_nb_ip['status'] != 'active':
-                        needs_update = True
-                    if not all(x in current_nb_ip['desc'] for x in [data['mac'], if_name]):
-                        needs_update = True
+                    needs_update = False
+                    if current_nb_ip['status'] != 'active': needs_update = True
+                    if current_nb_ip['full_address'] != full_addr: needs_update = True
+                    if not all(x in current_nb_ip['desc'] for x in [data['mac'], if_name]): needs_update = True
 
                     if needs_update:
                         final_desc = f"[UP: {w_pendek}] {base_info}"[:200]
-                        update_payload = {"id": current_nb_ip['id'], "status": "active", "description": final_desc}
-                        update_payload.update(assignment) # Add assignment if applicable
+                        update_payload = {"id": current_nb_ip['id'], "address": full_addr, "status": "active", "description": final_desc}
+                        update_payload.update(assignment)
                         ips_to_update.append(update_payload)
                 else:
-                    matched_prefix = "24"
-                    for p in self.prefixes_input:
-                        if ipaddress.ip_address(ip) in ipaddress.ip_network(p, strict=False):
-                            matched_prefix = p.split('/')[1]
-                            break
                     final_desc = f"[NEW: {w_pendek}] {base_info}"[:200]
-                    create_payload = {"address": f"{ip}/{matched_prefix}", "status": "active", "description": final_desc}
-                    create_payload.update(assignment) # Add assignment if applicable
+                    create_payload = {"address": full_addr, "status": "active", "description": final_desc}
+                    create_payload.update(assignment)
                     ips_to_create.append(create_payload)
 
             for ip, data in nb_ips.items():
@@ -537,6 +597,10 @@ class TuiBoxSync:
                     clean_desc = re.sub(r'^\[.*?\]\s*', '', data['desc'])
                     final_desc = f"[OFF: {w_pendek}] {clean_desc}"[:200]
                     ips_to_deprecate.append({"id": data['id'], "status": "deprecated", "description": final_desc})
+
+        # AUTO-CREATE PREFIXES
+        self.ensure_prefixes_exist(list(required_prefixes))
+
         
         errors = 0
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TaskProgressColumn(), console=console) as progress:

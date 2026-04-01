@@ -206,9 +206,31 @@ try:
         nb_v = nb.dcim.interfaces.get(device_id=dev.id, name=v['name']) or nb.dcim.interfaces.create(device=dev.id, name=v['name'], type='virtual')
         try:
             addr_final = IP_FULL if v['ip'] == IP_ADDR else f"{v['ip']}/24"
-            nb_ip = nb.ipam.ip_addresses.get(address=v['ip']) or nb.ipam.ip_addresses.create(address=addr_final, status='active', assigned_object_type='dcim.interface', assigned_object_id=nb_v.id)
+            
+            # Ensure Prefix exists
+            import ipaddress
+            try:
+                network = ipaddress.ip_network(addr_final, strict=False)
+                prefix_str = str(network)
+                if not nb.ipam.prefixes.get(prefix=prefix_str):
+                    print(f"  🆕 Menciptakan Prefix {prefix_str} di NetBox...")
+                    nb.ipam.prefixes.create(prefix=prefix_str, status='active', description="Auto-created by Sync Switch")
+            except: pass
+
+            nb_ip = nb.ipam.ip_addresses.get(address=v['ip'])
+            if not nb_ip:
+                 nb_ip = nb.ipam.ip_addresses.create(address=addr_final, status='active', assigned_object_type='dcim.interface', assigned_object_id=nb_v.id)
+            else:
+                 # Update if mask or assignment changed
+                 if nb_ip.address != addr_final or nb_ip.assigned_object_id != nb_v.id:
+                     nb_ip.address = addr_final
+                     nb_ip.assigned_object_type = 'dcim.interface'
+                     nb_ip.assigned_object_id = nb_v.id
+                     nb_ip.save()
+            
             if v['ip'] == IP_ADDR: dev.primary_ip4 = nb_ip.id; dev.save()
-        except: pass
+        except Exception as e:
+            print(f"  ⚠️ Gagal sync IP {v['ip']}: {e}")
 
     print(f"\n✨ Sinkronisasi Selesai: {len(ports_data)} port fisik dan {len(l3_data)} interface L3 berhasil disinkronisasi.")
 

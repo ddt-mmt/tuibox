@@ -150,6 +150,15 @@ class ProxmoxNetboxSync:
                 macs = re.findall(r'([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})', raw_cfg)
                 primary_ip_id = None
 
+                # Discovered IPs from config (LXC/VM Cloud-Init)
+                discovered_ips = {} # mac -> ip/mask
+                for k, v in config.items():
+                    if 'net' in k or 'ipconfig' in k:
+                        m_mac = re.search(r'hwaddr=([0-9A-Fa-f:]+)', str(v))
+                        m_ip = re.search(r'ip=([0-9\./]+)', str(v))
+                        if m_mac and m_ip:
+                            discovered_ips[m_mac.group(1).upper()] = m_ip.group(1)
+
                 for idx, mac in enumerate(macs):
                     mac = mac.upper()
                     if_name = f"net{idx}"
@@ -158,11 +167,36 @@ class ProxmoxNetboxSync:
                         if_id = requests.post(f"{nb_api}/virtualization/interfaces/", headers=self.headers, json={"virtual_machine": vm_id, "name": if_name, "mac_address": mac, "type": "virtual"}).json()['id']
                     else: if_id = if_check['results'][0]['id']
 
-                    ip_search = requests.get(f"{nb_api}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
-                    if ip_search['count'] > 0:
-                        ip_id = ip_search['results'][0]['id']
-                        requests.patch(f"{nb_api}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={"assigned_object_type": "virtualization.vminterface", "assigned_object_id": if_id})
+                    full_ip = discovered_ips.get(mac)
+                    if full_ip and "/" in full_ip:
+                        # Ensure Prefix Exists
+                        import ipaddress
+                        try:
+                            network = str(ipaddress.ip_network(full_ip, strict=False))
+                            p_check = requests.get(f"{nb_api}/ipam/prefixes/?prefix={network}", headers=self.headers).json()
+                            if p_check['count'] == 0:
+                                requests.post(f"{nb_api}/ipam/prefixes/", headers=self.headers, json={"prefix": network, "status": "active", "description": "Auto-created by Proxmox Sync"})
+                        except: pass
+
+                        # Sync IP Address
+                        ip_only = full_ip.split('/')[0]
+                        ip_check = requests.get(f"{nb_api}/ipam/ip-addresses/?address={ip_only}", headers=self.headers).json()
+                        if ip_check['count'] == 0:
+                            ip_id = requests.post(f"{nb_api}/ipam/ip-addresses/", headers=self.headers, json={"address": full_ip, "status": "active", "assigned_object_type": "virtualization.vminterface", "assigned_object_id": if_id}).json()['id']
+                        else:
+                            ip_id = ip_check['results'][0]['id']
+                            requests.patch(f"{nb_api}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={"address": full_ip, "assigned_object_type": "virtualization.vminterface", "assigned_object_id": if_id})
                         primary_ip_id = ip_id
+                    else:
+                        # Fallback to searching by MAC
+                        ip_search = requests.get(f"{nb_api}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
+                        if ip_search['count'] > 0:
+                            ip_id = ip_search['results'][0]['id']
+                            requests.patch(f"{nb_api}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={"assigned_object_type": "virtualization.vminterface", "assigned_object_id": if_id})
+                            primary_ip_id = ip_id
+
+                if primary_ip_id:
+                    requests.patch(f"{nb_api}/virtualization/virtual-machines/{vm_id}/", headers=self.headers, json={"primary_ip4": primary_ip_id})
 
                 if primary_ip_id:
                     requests.patch(f"{nb_api}/virtualization/virtual-machines/{vm_id}/", headers=self.headers, json={"primary_ip4": primary_ip_id})

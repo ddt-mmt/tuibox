@@ -149,6 +149,14 @@ class KvmNetboxSync:
                 # 3. Sync Interface & AUTO-MAP IP
                 domif = self.run_ssh(f"virsh domiflist '{vm_name}'")
                 macs = re.findall(r'([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', domif)
+                
+                # Try to get actual IPs from KVM
+                kvm_ips = {}
+                raw_addr = self.run_ssh(f"virsh domifaddr '{vm_name}'")
+                for line in raw_addr.splitlines():
+                    m_addr = re.search(r'([0-9a-fA-F:]{17})\s+ipv4\s+([0-9\./]+)', line)
+                    if m_addr: kvm_ips[m_addr.group(1).upper()] = m_addr.group(2)
+
                 primary_ip_id = None
 
                 for idx, mac in enumerate(macs):
@@ -163,18 +171,34 @@ class KvmNetboxSync:
                     else:
                         iface_id = if_check['results'][0]['id']
 
-                    ip_search = requests.get(f"{self.nb_url}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
-                    if ip_search['count'] > 0:
-                        ip_data = ip_search['results'][0]
-                        ip_id = ip_data['id']
-                        
-                        if not ip_data.get('assigned_object_id') == iface_id:
-                            requests.patch(f"{self.nb_url}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={
-                                "assigned_object_type": "virtualization.vminterface",
-                                "assigned_object_id": iface_id
-                            })
+                    full_ip = kvm_ips.get(mac)
+                    if full_ip and "/" in full_ip:
+                        # Ensure Prefix exists
+                        import ipaddress
+                        try:
+                            network = str(ipaddress.ip_network(full_ip, strict=False))
+                            p_check = requests.get(f"{self.nb_url}/ipam/prefixes/?prefix={network}", headers=self.headers).json()
+                            if p_check['count'] == 0:
+                                requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json={"prefix": network, "status": "active", "description": "Auto-created by KVM Sync"})
+                        except: pass
 
+                        # Create or Update IP
+                        ip_only = full_ip.split('/')[0]
+                        ip_check = requests.get(f"{self.nb_url}/ipam/ip-addresses/?address={ip_only}", headers=self.headers).json()
+                        if ip_check['count'] == 0:
+                            ip_id = requests.post(f"{self.nb_url}/ipam/ip-addresses/", headers=self.headers, json={"address": full_ip, "status": "active", "assigned_object_type": "virtualization.vminterface", "assigned_object_id": iface_id}).json()['id']
+                        else:
+                            ip_id = ip_check['results'][0]['id']
+                            requests.patch(f"{self.nb_url}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={"address": full_ip, "assigned_object_type": "virtualization.vminterface", "assigned_object_id": iface_id})
                         primary_ip_id = ip_id
+                    else:
+                        # Fallback to searching by MAC
+                        ip_search = requests.get(f"{self.nb_url}/ipam/ip-addresses/?q={mac}", headers=self.headers).json()
+                        if ip_search['count'] > 0:
+                            ip_data = ip_search['results'][0]
+                            ip_id = ip_data['id']
+                            requests.patch(f"{self.nb_url}/ipam/ip-addresses/{ip_id}/", headers=self.headers, json={"assigned_object_type": "virtualization.vminterface", "assigned_object_id": iface_id})
+                            primary_ip_id = ip_id
 
                 if primary_ip_id:
                     requests.patch(f"{self.nb_url}/virtualization/virtual-machines/{vm_id}/", headers=self.headers, json={
