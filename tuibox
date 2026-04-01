@@ -440,7 +440,15 @@ class TuiBoxSync:
                 console.print(f"Menciptakan {len(prefixes_to_create)} Parent Prefix baru...")
                 try:
                     res = requests.post(f"{self.nb_url}/ipam/prefixes/", headers=self.headers, json=prefixes_to_create)
-                except: pass
+                    res.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                    if res.status_code != 201:
+                        # This check might be redundant with raise_for_status, but good for explicit check
+                        console.print(f"[bold red]Gagal membuat Prefix. Status: {res.status_code}, Response: {res.text}[/bold red]")
+                except requests.exceptions.RequestException as e:
+                    console.print(f"[bold red]API Error saat membuat Prefix: {e}[/bold red]")
+                    # Optionally print more details if available in response
+                    if 'res' in locals() and hasattr(res, 'text'):
+                        console.print(f"[bold red]Response Body: {res.text}[/bold red]")
 
     def scan_and_sync(self):
         waktu_skrg = self.get_now()
@@ -454,7 +462,6 @@ class TuiBoxSync:
         interface_map = self.sync_interfaces_to_netbox(device_id)
         
         vlan_map = self.sync_vlans_to_netbox()
-        self.sync_prefixes_to_netbox()
 
         console.print(Panel(f"[bold cyan]Memulai Sinkronisasi IPAM[/bold cyan]\nWaktu: {waktu_skrg}", expand=False))
 
