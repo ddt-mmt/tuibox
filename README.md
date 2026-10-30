@@ -1,69 +1,53 @@
 # 📦 Tuibox: Alat Sinkronisasi Aset IT ke NetBox
 
-Tuibox adalah solusi terpadu berbasis Python yang dirancang untuk mengotomatisasi dan menyederhanakan proses sinkronisasi data aset IT Anda dari berbagai lingkungan (seperti platform virtualisasi dan perangkat jaringan) ke dalam NetBox. Tujuannya adalah untuk meningkatkan efisiensi operasional, mengurangi kesalahan manual, dan memastikan konsistensi serta akurasi data inventaris infrastruktur Anda.
-
-## ✨ Mengapa Tuibox?
-
-*   **Penyedia Data Terpusat**: Menggabungkan fungsionalitas dari beberapa skrip sinkronisasi ke dalam satu *framework* yang mudah digunakan.
-*   **Efisiensi Operasional**: Mengotomatisasi pembaruan data yang memakan waktu, memungkinkan tim fokus pada tugas-tugas strategis.
-*   **Akurasi Data**: Memastikan NetBox Anda selalu mencerminkan kondisi infrastruktur IT yang sebenarnya.
-*   **Manajemen Profesional**: Mendorong praktik terbaik dalam inventarisasi dan manajemen aset.
-
-## 🚀 Fitur Utama
-
-Tuibox hadir dengan serangkaian fitur untuk menjaga data NetBox Anda tetap mutakhir:
-
-### 🌐 Integrasi Data Multi-platform
-
-*   **Virtualisasi**: Sinkronisasi *Virtual Machines* (VM) secara otomatis dari:
-    *   Hyper-V (`sync_hyperv_netbox.py`)
-    *   KVM (`sync_kvm_netbox.py`)
-    *   Proxmox (`sync_proxmox_netbox.py`)
-    *   VMware (`sync_vmware_netbox.py`)
-*   **Jaringan**: Sinkronisasi konfigurasi perangkat jaringan (switch, router) dari berbagai vendor dengan `sync_switch.py`.
-*   **MikroTik Spesifik**: Sinkronisasi IPAM dan DCIM yang mendalam untuk perangkat MikroTik melalui skrip `tuibox` utama.
-
-### 📊 Manajemen IPAM Cerdas
-
-*   **Deteksi Prefix Otomatis**: Secara cerdas mengidentifikasi, membuat, dan memperbarui objek Prefix di NetBox untuk setiap alamat IP yang disinkronkan, memastikan konsistensi data subnet.
-*   **Deteksi IP Aktif yang Akurat**:
-    *   Meningkatkan algoritma deteksi perangkat aktif melalui pemindaian **ARP**, **DHCP Leases**, dan **Neighbor** dari perangkat jaringan.
-    *   Memastikan alamat IP perangkat router sendiri selalu diakui sebagai aktif.
-    *   Timeout `ping_sweep` dioptimalkan (dari 5ms menjadi 50ms) untuk mengurangi *false positive* pada IP yang 'offline', terutama pada perangkat yang responsnya lambat.
-*   **Sinkronisasi Mask IP**: Memastikan *subnet mask* yang benar dari sumber (MikroTik, KVM, Proxmox) disinkronkan ke NetBox, bukan hanya IP tanpa *mask*.
-
-### ⚙️ Konfigurasi Fleksibel & Keamanan
-
-*   **Opsi Konfigurasi Ganda**: Mendukung konfigurasi melalui file `.env` (direkomendasikan untuk keamanan) atau input interaktif yang mudah saat skrip dijalankan.
-*   **Penanganan Error Robust**: Memberikan notifikasi yang jelas dan keluar dengan aman saat terjadi kesalahan atau interupsi.
-*   **Laporan Ringkas**: Menyajikan ringkasan tindakan yang dilakukan (misalnya, jumlah item yang dibuat, diperbarui, atau dipetakan) setelah setiap proses sinkronisasi selesai.
-
-## 📝 Cara Penggunaan
-
-Ikuti langkah-langkah sederhana ini untuk memulai Tuibox:
-
-1.  **Prasyarat**:
-    *   Pastikan Anda memiliki **Python 3** terinstal.
-    *   Instal pustaka Python yang diperlukan menggunakan `pip`:
-        ```bash
-        pip install pynetbox netmiko rich requests
-        # Perhatikan: modul `ipaddress` adalah bawaan Python 3.x
-        ```
-
-2.  **Konfigurasi**:
-    *   Buat file `.env` di direktori `tuibox/` (contoh: `cp config.ini.example .env`).
-    *   Edit file `.env` dengan detail koneksi ke NetBox, serta kredensial untuk server virtualisasi/jaringan Anda.
-    *   *Alternatif*: Jika file `.env` tidak ditemukan, skrip akan memandu Anda melalui input interaktif.
-
-3.  **Eksekusi**:
-    *   Jalankan skrip Python yang relevan dari direktori `tuibox/` menggunakan Python 3.
-    *   Contoh: Untuk sinkronisasi KVM, jalankan `python3 sync_kvm_netbox.py`
-    *   Contoh: Untuk sinkronisasi MikroTik, jalankan `python3 tuibox`
-
-## 📜 Lisensi
-
-Proyek ini dirilis di bawah lisensi **MIT**. Lihat file `LICENSE` untuk detail selengkapnya.
+Tuibox adalah solusi terpadu berbasis Python yang dirancang untuk mengotomatisasi dan menyederhanakan proses sinkronisasi data aset IT Anda dari berbagai lingkungan (seperti platform virtualisasi dan perangkat jaringan) ke dalam NetBox.
 
 ---
 
-*Dikembangkan dengan ❤️ untuk efisiensi dan profesionalisme dalam manajemen infrastruktur IT.*
+## 🐳 Docker & Portainer Deployment (Rekomendasi Produksi)
+
+Agar layanan dapat berjalan secara stabil di latar belakang tanpa terikat pada terminal dan mudah dikelola, Tuibox mendukung penyebaran via **Docker** dan **Portainer**.
+
+### 1. Struktur Direktori `/root/tuibox/`
+```text
+/root/tuibox/
+├── Dockerfile          # Definisi container Python + SSHPass + Ping
+├── docker-compose.yml  # Konfigurasi Docker Compose (Portainer Ready)
+├── config.ini          # Konfigurasi koneksi MikroTik & NetBox API
+├── README.md           # Dokumentasi proyek
+└── tuibox_latest       # Skrip utama sinkronisasi
+```
+
+### 2. Cara Menjalankan via Docker Compose
+Masuk ke direktori tuibox lalu jalankan:
+```bash
+docker compose up -d --build
+```
+
+### 3. Cara Mengelola & Troubleshooting via Portainer
+1. **Melalui Portainer Stacks**:
+   - Buka dashboard Portainer, pilih **Stacks** -> **tuibox-sync**.
+   - Anda dapat melihat status container, melakukan restart, atau mengedit konfigurasi stack secara visual.
+2. **Melihat Real-time Logs**:
+   - Di Portainer, klik menu **Containers** -> pilih `tuibox-sync-service` -> klik ikon **Logs**.
+   - Atau via terminal:
+     ```bash
+     docker logs -f tuibox-sync-service
+     ```
+3. **Mengatasi Restart Loop / Limit Hit**:
+   - Konfigurasi Docker Compose telah dilengkapi dengan `restart: unless-stopped` dan penundaan yang aman untuk mencegah *crash loop*. Pastikan kredensial pada `config.ini` sudah benar.
+
+---
+
+## ✨ Fitur Utama
+- **Virtualisasi**: Hyper-V, KVM (`sync_kvm_netbox.py`), Proxmox (`sync_proxmox_netbox.py`), VMware.
+- **Jaringan**: Switch (`sync_switch.py`) & MikroTik (`tuibox_latest`).
+- **IPAM & DCIM Cerdas**: Deteksi Prefix, IP aktif, dan sinkronisasi mask otomatis ke NetBox.
+
+## 📝 Cara Penggunaan Manual
+1. Pastikan dependensi terinstal (`requests`, `rich`, `paramiko`).
+2. Konfigurasi file `config.ini`.
+3. Jalankan skrip: `python3 tuibox_latest`
+
+## 📜 Lisensi
+MIT License.
