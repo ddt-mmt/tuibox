@@ -1,0 +1,15 @@
+services:
+  tuibox-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tuibox-sync:latest
+    container_name: tuibox-sync-service
+    restart: unless-stopped
+    working_dir: /root
+    volumes:
+      - /root:/root:rw
+      - /var/log/tuibox:/var/log/tuibox:rw
+    network_mode: host
+    environment:
+      - TZ=Asia/Jakarta
